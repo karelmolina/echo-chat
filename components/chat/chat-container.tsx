@@ -65,6 +65,8 @@ export function ChatContainer({
         };
 
         setMessages((prev) => [...prev, userMessage, assistantMessage]);
+
+        window.dispatchEvent(new CustomEvent("conversation:updated"));
       } catch (error) {
         console.error("Chat error:", error);
         // Remove optimistic message on error
