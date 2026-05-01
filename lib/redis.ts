@@ -1,7 +1,21 @@
 import Redis from "ioredis";
 import { env } from "./env";
 
-function createRedisClient(name: string): Redis {
+declare global {
+  // eslint-disable-next-line no-var
+  var __redisPub: Redis | undefined;
+  // eslint-disable-next-line no-var
+  var __redisSub: Redis | undefined;
+  // eslint-disable-next-line no-var
+  var __redisStream: Redis | undefined;
+}
+
+function getRedisClient(name: string, globalKey: "__redisPub" | "__redisSub" | "__redisStream"): Redis {
+  const existing = globalThis[globalKey];
+  if (existing) {
+    return existing;
+  }
+
   const client = new Redis(env.REDIS_URL, {
     retryStrategy: (times: number) => {
       const delay = Math.min(times * 50, 2000);
@@ -28,9 +42,12 @@ function createRedisClient(name: string): Redis {
     console.log(`Redis ${name} reconnecting...`);
   });
 
+  globalThis[globalKey] = client;
   return client;
 }
 
-export const redisPub = createRedisClient("pub");
-export const redisSub = createRedisClient("sub");
-export const redisStream = createRedisClient("stream");
+// Pub/Sub require separate connections per Redis protocol.
+// All three are singletons to prevent connection exhaustion in serverless.
+export const redisPub = getRedisClient("pub", "__redisPub");
+export const redisSub = getRedisClient("sub", "__redisSub");
+export const redisStream = getRedisClient("stream", "__redisStream");
