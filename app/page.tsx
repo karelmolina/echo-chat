@@ -1,38 +1,36 @@
 "use client";
 
-import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { Sparkles } from "lucide-react";
+import { Sidebar } from "@/components/sidebar";
+import { SuggestedPrompts } from "@/components/chat/suggested-prompts";
 
 export default function HomePage(): React.JSX.Element {
-  const [message, setMessage] = useState("");
+  const router = useRouter();
+
+  const handlePromptSelect = (prompt: string): void => {
+    const id = crypto.randomUUID();
+    router.push(`/${id}?prompt=${encodeURIComponent(prompt)}`);
+  };
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="flex-1 p-4">
-        <p className="text-gray-500">Start a new conversation...</p>
-      </div>
-      <form
-        className="p-4 border-t border-gray-200"
-        onSubmit={(e) => {
-          e.preventDefault();
-          setMessage("");
-        }}
-      >
-        <div className="flex gap-2">
-          <input
-            type="text"
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            placeholder="Type your message..."
-            className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
-          <button
-            type="submit"
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
-          >
-            Send
-          </button>
+    <>
+      <Sidebar />
+      <main className="flex flex-1 flex-col items-center justify-center gap-8 p-8">
+        <div className="flex flex-col items-center gap-4 text-center">
+          <div className="flex size-16 items-center justify-center rounded-2xl bg-primary/10">
+            <Sparkles className="size-8 text-primary" />
+          </div>
+          <h1 className="font-headline text-3xl font-bold tracking-tight">
+            Welcome to Echo Chat
+          </h1>
+          <p className="max-w-md text-muted-foreground">
+            Your AI companion for intelligent conversations. Select a suggestion
+            below or start a new chat.
+          </p>
         </div>
-      </form>
-    </div>
+        <SuggestedPrompts onSelect={handlePromptSelect} />
+      </main>
+    </>
   );
 }
