@@ -38,6 +38,11 @@ export interface ChatResponse {
   content: string;
 }
 
+export interface StreamInitResponse {
+  streamId: string;
+  conversationId: string;
+}
+
 export interface ConversationsResponse {
   conversations: ConversationListItem[];
 }

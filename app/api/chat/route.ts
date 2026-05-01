@@ -1,11 +1,53 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import type { ChatRequest, ChatResponse } from "@/types";
+import {
+  createStream,
+  appendChunk,
+  markDone,
+  setActiveStream,
+  clearActiveStream,
+  publishEvent,
+} from "@/lib/stream-store";
+import type { ChatRequest, StreamInitResponse } from "@/types";
 
 function generateTitle(message: string): string {
   const trimmed = message.trim();
   if (!trimmed) return "New Conversation";
   return trimmed.slice(0, 50);
+}
+
+async function streamResponse(
+  streamId: string,
+  content: string,
+  conversationId: string
+): Promise<void> {
+  const words = content.split(" ");
+  let chunkId = 0;
+
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+    const data = i === 0 ? word : " " + word;
+    await appendChunk(streamId, { id: chunkId++, data, done: false });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+
+  await appendChunk(streamId, { id: chunkId, data: "", done: true });
+  await markDone(streamId);
+
+  await prisma.message.create({
+    data: {
+      role: "assistant",
+      content: content,
+      conversationId: conversationId,
+    },
+  });
+
+  await clearActiveStream(conversationId);
+  await publishEvent(conversationId, {
+    type: "stream-ended",
+    streamId,
+    conversationId,
+  });
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
@@ -20,6 +62,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     }
 
     const conversationId = body.conversationId ?? crypto.randomUUID();
+    const streamId = crypto.randomUUID();
 
     const existingConversation = body.conversationId
       ? await prisma.conversation.findUnique({
@@ -47,22 +90,31 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       },
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await createStream(streamId, {
+      conversationId: conversation.id,
+      createdAt: new Date().toISOString(),
+    });
+
+    await setActiveStream(conversation.id, streamId);
+
+    console.log(`[Chat] Publishing stream-started for conversation ${conversation.id}, stream ${streamId}`);
+
+    await publishEvent(conversation.id, {
+      type: "stream-started",
+      streamId,
+      conversationId: conversation.id,
+    });
+    console.log(`[Chat] Event published successfully`);
 
     const assistantContent = `Echo: ${body.message}`;
 
-    const assistantMessage = await prisma.message.create({
-      data: {
-        role: "assistant",
-        content: assistantContent,
-        conversationId: conversation.id,
-      },
+    streamResponse(streamId, assistantContent, conversation.id).catch((err) => {
+      console.error("Stream generation error:", err);
     });
 
-    const response: ChatResponse = {
+    const response: StreamInitResponse = {
+      streamId,
       conversationId: conversation.id,
-      messageId: assistantMessage.id,
-      content: assistantContent,
     };
 
     return NextResponse.json(response);
