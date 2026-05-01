@@ -5,15 +5,12 @@ import type { ChatMessage } from "@/types";
 
 interface ConversationPageProps {
   params: Promise<{ conversationId: string }>;
-  searchParams: Promise<{ prompt?: string }>;
 }
 
 export default async function ConversationPage({
   params,
-  searchParams,
 }: ConversationPageProps): Promise<React.JSX.Element> {
   const { conversationId } = await params;
-  const { prompt } = await searchParams;
 
   const messages = await prisma.message.findMany({
     where: { conversationId },
@@ -33,7 +30,6 @@ export default async function ConversationPage({
         <ChatContainer
           conversationId={conversationId}
           initialMessages={initialMessages}
-          initialPrompt={prompt}
         />
       </main>
     </>

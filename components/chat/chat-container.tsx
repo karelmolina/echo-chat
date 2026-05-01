@@ -13,20 +13,18 @@ import type { ChatMessage, ChatRequest, StreamInitResponse } from "@/types";
 interface ChatContainerProps {
   conversationId: string;
   initialMessages?: ChatMessage[];
-  initialPrompt?: string;
 }
 
 export function ChatContainer({
   conversationId,
   initialMessages = [],
-  initialPrompt,
 }: ChatContainerProps): React.JSX.Element {
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const lastMessage = initialMessages[initialMessages.length - 1];
   const [isLoading, setIsLoading] = useState(
-    lastMessage?.role === "assistant" && lastMessage.content === ""
+    lastMessage?.role === "user" ||
+      (lastMessage?.role === "assistant" && lastMessage.content === "")
   );
-  const initialPromptRef = useRef(initialPrompt);
   const streamSourceRef = useRef<EventSource | null>(null);
   const eventsSourceRef = useRef<EventSource | null>(null);
   const joinedStreamRef = useRef<string | null>(null);
@@ -177,29 +175,48 @@ export function ChatContainer({
 
   const checkActiveStream = useCallback(async () => {
     try {
-      const res = await fetch(`/api/conversations/${conversationId}/active-stream`);
-      if (!res.ok) return;
+      const messagesRes = await fetch(`/api/conversations/${conversationId}/messages`);
+      if (!messagesRes.ok) return;
+      const messagesData = (await messagesRes.json()) as { messages: ChatMessage[] };
+      setMessages(messagesData.messages);
 
-      const data = (await res.json()) as { active: boolean; streamId?: string };
+      const lastMsg = messagesData.messages[messagesData.messages.length - 1];
 
-      if (data.active && data.streamId) {
-        const streamId = data.streamId;
-        if (joinedStreamRef.current === streamId) return;
-        joinedStreamRef.current = streamId;
+      if (lastMsg?.role === "assistant") {
+        setIsLoading(false);
+        return;
+      }
 
+      if (lastMsg?.role === "user") {
         setIsLoading(true);
-        const messagesRes = await fetch(`/api/conversations/${conversationId}/messages`);
-        const messagesData = (await messagesRes.json()) as { messages: ChatMessage[] };
-        setMessages([
-          ...messagesData.messages,
-          {
-            id: crypto.randomUUID(),
-            role: "assistant",
-            content: "",
-            createdAt: new Date().toISOString(),
-          },
-        ]);
-        connectToStream(streamId);
+
+        const res = await fetch(`/api/conversations/${conversationId}/active-stream`);
+        if (!res.ok) return;
+        const data = (await res.json()) as { active: boolean; streamId?: string };
+
+        if (data.active && data.streamId) {
+          const streamId = data.streamId;
+          if (joinedStreamRef.current === streamId) return;
+          joinedStreamRef.current = streamId;
+
+          setMessages([
+            ...messagesData.messages,
+            {
+              id: crypto.randomUUID(),
+              role: "assistant",
+              content: "",
+              createdAt: new Date().toISOString(),
+            },
+          ]);
+          connectToStream(streamId);
+        } else {
+          const refreshRes = await fetch(`/api/conversations/${conversationId}/messages`);
+          if (refreshRes.ok) {
+            const refreshData = (await refreshRes.json()) as { messages: ChatMessage[] };
+            setMessages(refreshData.messages);
+          }
+          setIsLoading(false);
+        }
       }
     } catch {
       console.error(`[Client] Failed to check active stream for conversation ${conversationId}`);
@@ -256,15 +273,6 @@ export function ChatContainer({
     },
     [conversationId, connectToStream, closeStreamSource]
   );
-
-  useEffect(() => {
-    const prompt = initialPromptRef.current;
-    if (prompt) {
-      handleSend(prompt);
-      initialPromptRef.current = undefined;
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   useEffect(() => {
     subscribeToConversationEvents();
