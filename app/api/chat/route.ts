@@ -8,6 +8,8 @@ import {
   clearActiveStream,
   publishEvent,
 } from "@/lib/stream-store";
+import { createAIProvider } from "@/lib/ai/factory";
+import type { Message } from "@/lib/ai/types";
 import type { ChatRequest, StreamInitResponse } from "@/types";
 
 function generateTitle(message: string): string {
@@ -18,36 +20,61 @@ function generateTitle(message: string): string {
 
 async function streamResponse(
   streamId: string,
-  content: string,
   conversationId: string
 ): Promise<void> {
-  const words = content.split(" ");
+  const provider = createAIProvider();
   let chunkId = 0;
+  let fullContent = "";
 
-  for (let i = 0; i < words.length; i++) {
-    const word = words[i];
-    const data = i === 0 ? word : " " + word;
-    await appendChunk(streamId, { id: chunkId++, data, done: false });
-    await new Promise((resolve) => setTimeout(resolve, 200));
+  try {
+    // Fetch conversation history
+    const dbMessages = await prisma.message.findMany({
+      where: { conversationId },
+      orderBy: { createdAt: "asc" },
+    });
+
+    const messages: Message[] = [
+      { role: "system", content: "You are a helpful assistant." },
+      ...dbMessages.map((m) => ({
+        role: m.role as "user" | "assistant",
+        content: m.content,
+      })),
+    ];
+
+    await provider.streamChat(messages, async (chunk) => {
+      fullContent += chunk;
+      await appendChunk(streamId, { id: chunkId++, data: chunk, done: false });
+    });
+
+    await appendChunk(streamId, { id: chunkId, data: "", done: true });
+    await markDone(streamId);
+
+    await prisma.message.create({
+      data: {
+        role: "assistant",
+        content: fullContent,
+        conversationId,
+      },
+    });
+  } catch (error) {
+    console.error("AI streaming error:", error);
+    const errorMessage =
+      error instanceof Error ? error.message : "An error occurred";
+    await appendChunk(streamId, {
+      id: chunkId++,
+      data: `\n\n[Error: ${errorMessage}]`,
+      done: false,
+    });
+    await appendChunk(streamId, { id: chunkId, data: "", done: true });
+    await markDone(streamId);
+  } finally {
+    await clearActiveStream(conversationId);
+    await publishEvent(conversationId, {
+      type: "stream-ended",
+      streamId,
+      conversationId,
+    });
   }
-
-  await appendChunk(streamId, { id: chunkId, data: "", done: true });
-  await markDone(streamId);
-
-  await prisma.message.create({
-    data: {
-      role: "assistant",
-      content: content,
-      conversationId: conversationId,
-    },
-  });
-
-  await clearActiveStream(conversationId);
-  await publishEvent(conversationId, {
-    type: "stream-ended",
-    streamId,
-    conversationId,
-  });
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
@@ -97,7 +124,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
     await setActiveStream(conversation.id, streamId);
 
-    console.log(`[Chat] Publishing stream-started for conversation ${conversation.id}, stream ${streamId}`);
+    console.log(
+      `[Chat] Publishing stream-started for conversation ${conversation.id}, stream ${streamId}`
+    );
 
     await publishEvent(conversation.id, {
       type: "stream-started",
@@ -106,9 +135,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     });
     console.log(`[Chat] Event published successfully`);
 
-    const assistantContent = `Echo: ${body.message}`;
-
-    streamResponse(streamId, assistantContent, conversation.id).catch((err) => {
+    streamResponse(streamId, conversation.id).catch((err) => {
       console.error("Stream generation error:", err);
     });
 
