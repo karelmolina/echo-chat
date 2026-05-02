@@ -15,12 +15,71 @@ interface ChatContainerProps {
   initialMessages?: ChatMessage[];
 }
 
+function createAssistantPlaceholder(id = crypto.randomUUID()): ChatMessage {
+  return {
+    id,
+    role: "assistant",
+    content: "",
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function preferAssistantMessage(
+  current: ChatMessage,
+  next: ChatMessage
+): ChatMessage {
+  if (!current.content) return next;
+  if (!next.content) return current;
+  if (next.content.startsWith(current.content)) return next;
+  if (current.content.startsWith(next.content)) return current;
+  return current.createdAt >= next.createdAt ? current : next;
+}
+
+function normalizeMessages(messages: ChatMessage[]): ChatMessage[] {
+  const normalized: ChatMessage[] = [];
+
+  for (const message of messages) {
+    const lastMessage = normalized[normalized.length - 1];
+
+    if (lastMessage?.role === "assistant" && message.role === "assistant") {
+      normalized[normalized.length - 1] = preferAssistantMessage(
+        lastMessage,
+        message
+      );
+      continue;
+    }
+
+    normalized.push(message);
+  }
+
+  return normalized;
+}
+
+function withAssistantPlaceholder(
+  messages: ChatMessage[],
+  assistantMessageId?: string
+): ChatMessage[] {
+  const normalized = normalizeMessages(messages);
+  const lastMessage = normalized[normalized.length - 1];
+
+  if (lastMessage?.role === "assistant") {
+    return normalized;
+  }
+
+  return [
+    ...normalized,
+    createAssistantPlaceholder(assistantMessageId),
+  ];
+}
+
 export function ChatContainer({
   conversationId,
   initialMessages = [],
 }: ChatContainerProps): React.JSX.Element {
-  const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
-  const lastMessage = initialMessages[initialMessages.length - 1];
+  const normalizedInitialMessages = normalizeMessages(initialMessages);
+  const [messages, setMessages] = useState<ChatMessage[]>(normalizedInitialMessages);
+  const lastMessage =
+    normalizedInitialMessages[normalizedInitialMessages.length - 1];
   const [isLoading, setIsLoading] = useState(
     lastMessage?.role === "user" ||
       (lastMessage?.role === "assistant" && lastMessage.content === "")
@@ -28,13 +87,17 @@ export function ChatContainer({
   const streamSourceRef = useRef<EventSource | null>(null);
   const eventsSourceRef = useRef<EventSource | null>(null);
   const joinedStreamRef = useRef<string | null>(null);
+  const assistantMessageIdRef = useRef<string | null>(null);
+  const lastChunkIdRef = useRef<number>(-1);
 
   const closeStreamSource = useCallback(() => {
     if (streamSourceRef.current) {
       streamSourceRef.current.close();
       streamSourceRef.current = null;
-      joinedStreamRef.current = null;
     }
+    joinedStreamRef.current = null;
+    assistantMessageIdRef.current = null;
+    lastChunkIdRef.current = -1;
   }, []);
 
   const closeEventsSource = useCallback(() => {
@@ -44,13 +107,40 @@ export function ChatContainer({
     }
   }, []);
 
+  const syncMessagesFromServer = useCallback(async (): Promise<ChatMessage[]> => {
+    const res = await fetch(`/api/conversations/${conversationId}/messages`);
+    if (!res.ok) {
+      throw new Error("Failed to fetch messages");
+    }
+
+    const data = (await res.json()) as { messages: ChatMessage[] };
+    const nextMessages = normalizeMessages(data.messages);
+    setMessages(nextMessages);
+    return nextMessages;
+  }, [conversationId]);
+
   const connectToStream = useCallback(
     (streamId: string, assistantMessageId?: string, lastEventId?: string) => {
+      if (assistantMessageId) {
+        assistantMessageIdRef.current = assistantMessageId;
+      }
+
+      if (streamSourceRef.current && joinedStreamRef.current === streamId) {
+        return;
+      }
+
+      const resumeFromEventId =
+        lastEventId ??
+        (joinedStreamRef.current === streamId && lastChunkIdRef.current >= 0
+          ? String(lastChunkIdRef.current)
+          : undefined);
+
       closeStreamSource();
+      joinedStreamRef.current = streamId;
 
       const url = new URL(`/api/stream/${streamId}`, window.location.origin);
-      if (lastEventId) {
-        url.searchParams.set("lastEventId", lastEventId);
+      if (resumeFromEventId) {
+        url.searchParams.set("lastEventId", resumeFromEventId);
       }
 
       const es = new EventSource(url.toString());
@@ -64,6 +154,14 @@ export function ChatContainer({
             done: boolean;
           };
 
+          if (chunk.id <= lastChunkIdRef.current && !chunk.done) {
+            return;
+          }
+
+          if (chunk.id > lastChunkIdRef.current) {
+            lastChunkIdRef.current = chunk.id;
+          }
+
           if (chunk.done) {
             closeStreamSource();
             setIsLoading(false);
@@ -75,23 +173,26 @@ export function ChatContainer({
           setMessages((prev) => {
             const lastMsg = prev[prev.length - 1];
             if (lastMsg?.role === "assistant") {
-              return [
+              return normalizeMessages([
                 ...prev.slice(0, -1),
                 {
                   ...lastMsg,
                   content: lastMsg.content + chunk.data,
                 },
-              ];
+              ]);
             }
-            return [
+            return normalizeMessages([
               ...prev,
               {
-                id: assistantMessageId ?? crypto.randomUUID(),
+                id:
+                  assistantMessageIdRef.current ??
+                  assistantMessageId ??
+                  crypto.randomUUID(),
                 role: "assistant",
                 content: chunk.data,
                 createdAt: new Date().toISOString(),
               },
-            ];
+            ]);
           });
         } catch {
           console.error(`[Client] Failed to parse event:`, event.data);
@@ -143,24 +244,34 @@ export function ChatContainer({
             console.log(`[Client] Ignoring stream-started event for already-joined stream ${streamId}`);
             return;
           }
-          joinedStreamRef.current = streamId;
           setIsLoading(true);
           fetch(`/api/conversations/${conversationId}/messages`)
             .then((res) => res.json())
             .then((result: { messages: ChatMessage[] }) => {
-              setMessages([
-                ...result.messages,
-                {
-                  id: crypto.randomUUID(),
-                  role: "assistant",
-                  content: "",
-                  createdAt: new Date().toISOString(),
-                },
-              ]);
+              setMessages(withAssistantPlaceholder(result.messages));
               connectToStream(streamId);
             })
             .catch(() => {
               setIsLoading(false);
+            });
+          return;
+        }
+
+        if (data.type === "stream-ended" && data.streamId) {
+          if (joinedStreamRef.current === data.streamId) {
+            closeStreamSource();
+          }
+
+          void syncMessagesFromServer()
+            .catch(() => {
+              console.error(
+                `[Client] Failed to sync messages for conversation ${conversationId}`
+              );
+            })
+            .finally(() => {
+              setIsLoading(false);
+              joinedStreamRef.current = null;
+              window.dispatchEvent(new CustomEvent("conversation:updated"));
             });
         }
       } catch {
@@ -171,16 +282,19 @@ export function ChatContainer({
     es.onerror = () => {
       console.error(`[Client] Events connection error for conversation ${conversationId}`);
     };
-  }, [conversationId, connectToStream, closeEventsSource]);
+  }, [
+    closeEventsSource,
+    closeStreamSource,
+    connectToStream,
+    conversationId,
+    syncMessagesFromServer,
+  ]);
 
   const checkActiveStream = useCallback(async () => {
     try {
-      const messagesRes = await fetch(`/api/conversations/${conversationId}/messages`);
-      if (!messagesRes.ok) return;
-      const messagesData = (await messagesRes.json()) as { messages: ChatMessage[] };
-      setMessages(messagesData.messages);
+      const messagesData = await syncMessagesFromServer();
 
-      const lastMsg = messagesData.messages[messagesData.messages.length - 1];
+      const lastMsg = messagesData[messagesData.length - 1];
 
       if (lastMsg?.role === "assistant") {
         setIsLoading(false);
@@ -197,31 +311,18 @@ export function ChatContainer({
         if (data.active && data.streamId) {
           const streamId = data.streamId;
           if (joinedStreamRef.current === streamId) return;
-          joinedStreamRef.current = streamId;
 
-          setMessages([
-            ...messagesData.messages,
-            {
-              id: crypto.randomUUID(),
-              role: "assistant",
-              content: "",
-              createdAt: new Date().toISOString(),
-            },
-          ]);
+          setMessages(withAssistantPlaceholder(messagesData));
           connectToStream(streamId);
         } else {
-          const refreshRes = await fetch(`/api/conversations/${conversationId}/messages`);
-          if (refreshRes.ok) {
-            const refreshData = (await refreshRes.json()) as { messages: ChatMessage[] };
-            setMessages(refreshData.messages);
-          }
+          await syncMessagesFromServer().catch(() => undefined);
           setIsLoading(false);
         }
       }
     } catch {
       console.error(`[Client] Failed to check active stream for conversation ${conversationId}`);
     }
-  }, [conversationId, connectToStream]);
+  }, [conversationId, connectToStream, syncMessagesFromServer]);
 
   const handleSend = useCallback(
     async (content: string) => {
@@ -242,7 +343,9 @@ export function ChatContainer({
         createdAt: new Date().toISOString(),
       };
 
-      setMessages((prev) => [...prev, userMessage, assistantMessage]);
+      setMessages((prev) =>
+        normalizeMessages([...prev, userMessage, assistantMessage])
+      );
       setIsLoading(true);
 
       try {
@@ -262,7 +365,6 @@ export function ChatContainer({
         }
 
         const data = (await res.json()) as StreamInitResponse;
-        joinedStreamRef.current = data.streamId;
         connectToStream(data.streamId, assistantMessageId);
       } catch (error) {
         console.error("Chat error:", error);
@@ -293,7 +395,7 @@ export function ChatContainer({
   }, []);
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex h-full min-h-0 flex-col">
       <MessageList messages={messages} />
       <ChatInput onSend={handleSend} isLoading={isLoading} />
     </div>

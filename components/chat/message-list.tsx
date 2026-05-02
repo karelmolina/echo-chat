@@ -27,7 +27,7 @@ export function MessageList({ messages }: MessageListProps): React.JSX.Element {
   }
 
   return (
-    <ScrollArea className="flex-1" ref={scrollRef}>
+    <ScrollArea className="min-h-0 flex-1" viewportRef={scrollRef}>
       <div className="flex flex-col gap-4 p-4">
         {messages.map((message) => (
           <MessageBubble key={message.id} message={message} />

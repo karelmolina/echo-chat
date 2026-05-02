@@ -13,8 +13,11 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ): Promise<Response> {
   const { id } = await params;
-  const lastEventId = request.nextUrl.searchParams.get("lastEventId");
-  const fromId = lastEventId ? parseInt(lastEventId, 10) : -1;
+  const lastEventId =
+    request.nextUrl.searchParams.get("lastEventId") ??
+    request.headers.get("last-event-id");
+  const parsedLastEventId = lastEventId ? Number.parseInt(lastEventId, 10) : NaN;
+  const fromId = Number.isNaN(parsedLastEventId) ? -1 : parsedLastEventId;
 
   const exists = await streamExists(id);
   if (!exists) {
