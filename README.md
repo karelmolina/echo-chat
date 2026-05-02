@@ -2,7 +2,7 @@
 
 A simple AI chat app with durable streaming that survives page refreshes and works across multiple tabs.
 
-**Live demo:** [your-vercel-url.vercel.app](https://your-vercel-url.vercel.app)
+**Live demo:** [Vercel App](https://echo-chat-git-master-karelmolinas-projects.vercel.app)
 
 ## Stack
 
